@@ -26,8 +26,6 @@ async def lifespan(app: FastAPI):
                 if inspect.isawaitable(result):
                     await result
             except Exception:
-                # Shutdown should continue even if a provider
-                # client fails to close.
                 pass
 
 
@@ -43,13 +41,21 @@ class ExecuteRequest(BaseModel):
     action: str = Field(
         min_length=1,
         max_length=30,
-        description="Provider action",
     )
 
     params: dict[str, Any] = Field(
         default_factory=dict,
-        description="Provider action parameters",
     )
+
+
+class ResolveRequest(BaseModel):
+    source_id: str = Field(
+        min_length=1,
+        max_length=300,
+    )
+
+    language: str | None = None
+    quality: str | None = None
 
 
 @app.get("/")
@@ -75,8 +81,6 @@ async def health():
 
 @app.get("/api/v1/manifest")
 async def manifest():
-    providers = engine.list_providers()
-
     return {
         "name": settings.APP_NAME,
         "version": app.version,
@@ -86,11 +90,14 @@ async def manifest():
         "execute_endpoint": (
             "/api/v1/providers/{provider_id}/execute"
         ),
-        "providers": providers,
+        "providers": engine.list_providers(),
         "capabilities": [
             "search",
             "details",
             "episodes",
+            "sources",
+            "resolve",
+            "subtitles",
         ],
     }
 
@@ -135,19 +142,13 @@ async def execute_provider(
 
 
 # --------------------------------------------------
-# CONVENIENT ANIME API ROUTES
+# ANIME SEARCH
 # --------------------------------------------------
 
 @app.get("/api/v1/anime/search")
 async def search_anime(
-    q: str = Query(
-        min_length=1,
-        max_length=150,
-    ),
-    page: int = Query(
-        default=1,
-        ge=1,
-    ),
+    q: str = Query(min_length=1, max_length=150),
+    page: int = Query(default=1, ge=1),
 ):
     if page > settings.MAX_PAGINATION_PAGES:
         raise HTTPException(
@@ -168,6 +169,25 @@ async def search_anime(
     )
 
 
+# --------------------------------------------------
+# ANIME DETAILS
+# --------------------------------------------------
+
+@app.get("/api/v1/anime/{slug}")
+async def anime_details(slug: str):
+    return await engine.execute(
+        provider_id="anizone",
+        action="details",
+        params={
+            "slug": slug,
+        },
+    )
+
+
+# --------------------------------------------------
+# EPISODE LIST
+# --------------------------------------------------
+
 @app.get("/api/v1/anime/{slug}/episodes")
 async def anime_episodes(slug: str):
     return await engine.execute(
@@ -179,12 +199,70 @@ async def anime_episodes(slug: str):
     )
 
 
-@app.get("/api/v1/anime/{slug}")
-async def anime_details(slug: str):
+# --------------------------------------------------
+# PLAYBACK SOURCES
+# --------------------------------------------------
+
+@app.get(
+    "/api/v1/anime/{slug}/episodes/{episode_id}/sources"
+)
+async def episode_sources(
+    slug: str,
+    episode_id: str,
+    language: str | None = None,
+):
     return await engine.execute(
         provider_id="anizone",
-        action="details",
+        action="sources",
         params={
             "slug": slug,
+            "episode_id": episode_id,
+            "language": language,
+        },
+    )
+
+
+# --------------------------------------------------
+# SOURCE RESOLUTION
+# --------------------------------------------------
+
+@app.post(
+    "/api/v1/anime/{slug}/episodes/{episode_id}/resolve"
+)
+async def resolve_episode_source(
+    slug: str,
+    episode_id: str,
+    request: ResolveRequest,
+):
+    return await engine.execute(
+        provider_id="anizone",
+        action="resolve",
+        params={
+            "slug": slug,
+            "episode_id": episode_id,
+            "source_id": request.source_id,
+            "language": request.language,
+            "quality": request.quality,
+        },
+    )
+
+
+# --------------------------------------------------
+# SUBTITLES
+# --------------------------------------------------
+
+@app.get(
+    "/api/v1/anime/{slug}/episodes/{episode_id}/subtitles"
+)
+async def episode_subtitles(
+    slug: str,
+    episode_id: str,
+):
+    return await engine.execute(
+        provider_id="anizone",
+        action="subtitles",
+        params={
+            "slug": slug,
+            "episode_id": episode_id,
         },
     )
