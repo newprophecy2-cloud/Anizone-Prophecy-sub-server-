@@ -1,4 +1,6 @@
 
+from __future__ import annotations
+
 import asyncio
 import html
 import json
@@ -13,19 +15,12 @@ import httpx
 from app.config import settings
 
 
-DEFAULT_BASE_URL = "https://anizone.to"
-DEFAULT_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) "
-    "AppleWebKit/537.36 "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
-MAX_RESPONSE_BYTES = 4 * 1024 * 1024
-MAX_PAGES = 64
-
-
 class AniZoneError(Exception):
-    def __init__(self, message: str, code: str = "ANIZONE_ERROR"):
+    def __init__(
+        self,
+        message: str,
+        code: str = "ANIZONE_ERROR",
+    ):
         self.message = message
         self.code = code
         super().__init__(message)
@@ -64,9 +59,8 @@ class EpisodePage:
 class AniZoneClient:
 
     def __init__(self):
-
-        configured_url = (
-            settings.ANIZONE_BASE_URL or DEFAULT_BASE_URL
+        configured_url = str(
+            settings.ANIZONE_BASE_URL
         ).rstrip("/")
 
         parsed = urlparse(configured_url)
@@ -79,12 +73,15 @@ class AniZoneClient:
 
         self.base_url = configured_url
         self.timeout = settings.REQUEST_TIMEOUT
+        self.max_retries = settings.REQUEST_RETRIES
+        self.max_response_bytes = settings.MAX_RESPONSE_BYTES
+        self.max_pages = settings.MAX_PAGINATION_PAGES
 
         self.client = httpx.AsyncClient(
-            timeout=self.timeout,
+            timeout=httpx.Timeout(self.timeout),
             follow_redirects=True,
             headers={
-                "User-Agent": DEFAULT_UA,
+                "User-Agent": settings.USER_AGENT,
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept": (
                     "text/html,application/xhtml+xml,"
@@ -94,7 +91,8 @@ class AniZoneClient:
         )
 
     async def close(self):
-        await self.client.aclose()
+        if not self.client.is_closed:
+            await self.client.aclose()
 
     def _url(self, path: str) -> str:
         return urljoin(
@@ -110,13 +108,12 @@ class AniZoneClient:
         params=None,
         json_body=None,
         headers=None,
-    ):
+    ) -> httpx.Response:
 
         url = self._url(path)
         last_error = None
 
-        for attempt in range(3):
-
+        for attempt in range(self.max_retries + 1):
             try:
                 response = await self.client.request(
                     method,
@@ -128,9 +125,9 @@ class AniZoneClient:
 
                 response.raise_for_status()
 
-                if len(response.content) > MAX_RESPONSE_BYTES:
+                if len(response.content) > self.max_response_bytes:
                     raise AniZoneError(
-                        "Response exceeded size limit",
+                        "Response exceeded configured size limit",
                         "RESPONSE_TOO_LARGE",
                     )
 
@@ -140,7 +137,6 @@ class AniZoneClient:
                 raise
 
             except httpx.HTTPStatusError as exc:
-
                 status = exc.response.status_code
 
                 if status == 404:
@@ -149,7 +145,7 @@ class AniZoneClient:
                         "NOT_FOUND",
                     ) from exc
 
-                if status not in (429, 500, 502, 503, 504):
+                if status not in (408, 429, 500, 502, 503, 504):
                     raise AniZoneError(
                         f"AniZone HTTP error: {status}",
                         "UPSTREAM_HTTP_ERROR",
@@ -157,11 +153,16 @@ class AniZoneClient:
 
                 last_error = exc
 
-            except httpx.HTTPError as exc:
+            except httpx.TimeoutException as exc:
                 last_error = exc
 
-            if attempt < 2:
-                await asyncio.sleep(0.5 * (attempt + 1))
+            except httpx.RequestError as exc:
+                last_error = exc
+
+            if attempt < self.max_retries:
+                await asyncio.sleep(
+                    min(0.5 * (attempt + 1), 3.0)
+                )
 
         raise AniZoneError(
             f"AniZone request failed: {last_error}",
@@ -169,7 +170,6 @@ class AniZoneClient:
         )
 
     async def _get_page(self, path: str, params=None):
-
         response = await self._request(
             "GET",
             path,
@@ -202,7 +202,7 @@ class AniZoneClient:
         if not query:
             return []
 
-        if page < 1 or page > MAX_PAGES:
+        if page < 1 or page > self.max_pages:
             raise AniZoneError(
                 "Invalid search page",
                 "INVALID_PAGE",
@@ -214,7 +214,6 @@ class AniZoneClient:
         )
 
         state = self._initial_page(content, cookies)
-
         seen_cursors = set()
 
         for _ in range(1, page):
@@ -252,6 +251,7 @@ class AniZoneClient:
                 "media_type": item.media_type,
                 "year": item.year,
                 "poster": item.poster,
+                "episode_count": item.episode_count,
                 "season_count": None,
             }
             for item in parsed
@@ -266,38 +266,39 @@ class AniZoneClient:
         self._validate_slug(slug)
 
         state = await self._scrape_series(slug)
-
         episodes = self._parse_episodes(state.items)
 
-        season_numbers = [
-            item.season
-            for item in episodes
-            if item.season is not None
-        ]
-
-        season_number = (
-            min(season_numbers)
-            if season_numbers
-            else 1
-        )
-
-        episode_data = []
+        seasons = {}
 
         for episode in episodes:
+            season_number = episode.season or 1
 
-            episode_data.append({
+            seasons.setdefault(
+                season_number,
+                [],
+            ).append({
                 "id": episode.id,
                 "number": episode.number,
-                "season": episode.season or season_number,
+                "season": season_number,
                 "title": episode.title,
                 "description": episode.description,
                 "provider_episode_id": episode.id,
-                "provider_season_id": (
-                    str(episode.season)
-                    if episode.season is not None
-                    else str(season_number)
-                ),
+                "provider_season_id": str(season_number),
             })
+
+        season_data = [
+            {
+                "number": season_number,
+                "provider_season_id": str(season_number),
+                "episodes": sorted(
+                    season_episodes,
+                    key=lambda item: item["number"],
+                ),
+            }
+            for season_number, season_episodes in sorted(
+                seasons.items()
+            )
+        ]
 
         return {
             "id": slug,
@@ -308,13 +309,8 @@ class AniZoneClient:
             "description": None,
             "poster": None,
             "genres": [],
-            "seasons": [
-                {
-                    "number": season_number,
-                    "provider_season_id": str(season_number),
-                    "episodes": episode_data,
-                }
-            ],
+            "season_count": len(season_data),
+            "seasons": season_data,
         }
 
     # --------------------------------------------------
@@ -326,8 +322,7 @@ class AniZoneClient:
         self._validate_slug(slug)
 
         state = await self._scrape_series(slug)
-
-        episodes = self._parse_episodes(state.items)
+        parsed = self._parse_episodes(state.items)
 
         return {
             "provider": "anizone",
@@ -341,7 +336,7 @@ class AniZoneClient:
                     "title": item.title,
                     "description": item.description,
                 }
-                for item in episodes
+                for item in parsed
             ],
         }
 
@@ -370,22 +365,20 @@ class AniZoneClient:
 
             seen_cursors.add(state.cursor)
 
-            previous_items = state.items
-
             next_state = await self._load_page(
                 f"/anime/{slug}",
                 state,
             )
 
             next_state.items = self._merge_items(
-                previous_items,
+                state.items,
                 next_state.items,
             )
 
             state = next_state
             page_count += 1
 
-            if page_count >= MAX_PAGES and state.has_more:
+            if page_count >= self.max_pages and state.has_more:
                 raise AniZoneError(
                     "Episode pagination limit exceeded",
                     "PAGINATION_LIMIT",
@@ -428,7 +421,7 @@ class AniZoneClient:
         }
 
         headers = {
-            "User-Agent": DEFAULT_UA,
+            "User-Agent": settings.USER_AGENT,
             "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/json",
             "X-Livewire": "",
@@ -454,23 +447,25 @@ class AniZoneClient:
                 "INVALID_RESPONSE",
             ) from exc
 
-        component = (
-            value.get("components", [{}])[0]
-            if value.get("components")
-            else None
-        )
+        components = value.get("components")
 
-        if not isinstance(component, dict):
+        if not isinstance(components, list) or not components:
             raise AniZoneError(
                 "Missing Livewire component",
                 "PAGINATION_ERROR",
             )
 
-        snapshot = component.get("snapshot")
+        component = components[0]
 
-        dispatches = (
-            component.get("effects", {}).get("dispatches")
-        )
+        if not isinstance(component, dict):
+            raise AniZoneError(
+                "Invalid Livewire component",
+                "PAGINATION_ERROR",
+            )
+
+        snapshot = component.get("snapshot")
+        effects = component.get("effects") or {}
+        dispatches = effects.get("dispatches")
 
         if not isinstance(snapshot, str):
             raise AniZoneError(
@@ -487,18 +482,19 @@ class AniZoneClient:
         dispatch = next(
             (
                 item for item in dispatches
-                if item.get("name") == "items-loaded"
+                if isinstance(item, dict)
+                and item.get("name") == "items-loaded"
             ),
             None,
         )
 
-        if not dispatch:
+        if dispatch is None:
             raise AniZoneError(
                 "Missing items-loaded event",
                 "PAGINATION_ERROR",
             )
 
-        params = dispatch.get("params", {})
+        params = dispatch.get("params") or {}
         items = params.get("items")
 
         if not isinstance(items, list):
@@ -535,7 +531,7 @@ class AniZoneClient:
 
         if not isinstance(items_value, list):
             raise AniZoneError(
-                "Episode/search items payload not found",
+                "Initial items payload not found",
                 "PARSE_ERROR",
             )
 
@@ -565,8 +561,6 @@ class AniZoneClient:
             "anmTitles",
         )
 
-        series_title = self._pick_title(titles)
-
         return EpisodePage(
             items=items_value,
             snapshot=snapshot,
@@ -579,11 +573,8 @@ class AniZoneClient:
                 or False
             ),
             csrf=csrf,
-            cookies=self._merge_cookies(
-                {},
-                cookies,
-            ),
-            series_title=series_title,
+            cookies=self._merge_cookies({}, cookies),
+            series_title=self._pick_title(titles),
         )
 
     # --------------------------------------------------
@@ -604,10 +595,7 @@ class AniZoneClient:
             if not isinstance(slug, str):
                 continue
 
-            if not re.fullmatch(
-                r"[A-Za-z0-9-]{1,180}",
-                slug,
-            ):
+            if not re.fullmatch(r"[A-Za-z0-9-]{1,180}", slug):
                 continue
 
             title = (
@@ -623,17 +611,14 @@ class AniZoneClient:
             ).lower()
 
             year = item.get("start_year")
-
             if not isinstance(year, int):
                 year = None
 
             cover = item.get("cover")
-
             if not isinstance(cover, str):
                 cover = None
 
             count = item.get("episode_count")
-
             if not isinstance(count, int):
                 count = None
 
@@ -669,7 +654,6 @@ class AniZoneClient:
                 continue
 
             source_number = None
-
             raw_slug = item.get("slug")
 
             if isinstance(raw_slug, str) and raw_slug.isdigit():
@@ -684,17 +668,20 @@ class AniZoneClient:
                     if last.isdigit():
                         source_number = int(last)
 
-            if not source_number or source_number in seen:
+            if not source_number:
                 continue
 
-            seen.add(source_number)
+            season = self._parse_season(item)
+            identity = (season or 1, source_number)
+
+            if identity in seen:
+                continue
+
+            seen.add(identity)
 
             title = self._pick_title(
                 item.get("title_list")
-            )
-
-            if not title:
-                title = f"Episode {source_number}"
+            ) or f"Episode {source_number}"
 
             summary = item.get("summary")
 
@@ -707,11 +694,16 @@ class AniZoneClient:
                     number=source_number,
                     title=title,
                     description=summary,
-                    season=self._parse_season(item),
+                    season=season,
                 )
             )
 
-        results.sort(key=lambda item: item.number)
+        results.sort(
+            key=lambda item: (
+                item.season or 1,
+                item.number,
+            )
+        )
 
         return results
 
@@ -723,7 +715,6 @@ class AniZoneClient:
             "season_number",
             "seasonNumber",
         ):
-
             value = item.get(key)
 
             if isinstance(value, int) and value > 0:
@@ -732,7 +723,7 @@ class AniZoneClient:
         return None
 
     # --------------------------------------------------
-    # JSON / JAVASCRIPT PARSING
+    # JAVASCRIPT / JSON HELPERS
     # --------------------------------------------------
 
     @staticmethod
@@ -769,8 +760,8 @@ class AniZoneClient:
 
         return "".join(output)
 
-    @classmethod
-    def _decode_js_string(cls, raw: str):
+    @staticmethod
+    def _decode_js_string(raw: str):
 
         output = []
         index = 0
@@ -805,7 +796,6 @@ class AniZoneClient:
                 output.append(escapes[char])
 
             elif char == "u" and index + 4 < len(raw):
-
                 code = raw[index + 1:index + 5]
 
                 try:
@@ -815,7 +805,6 @@ class AniZoneClient:
                     output.append("u")
 
             elif char == "x" and index + 2 < len(raw):
-
                 code = raw[index + 1:index + 3]
 
                 try:
@@ -836,38 +825,13 @@ class AniZoneClient:
 
         marker = f"{name}: JSON.parse('")
 
-        raw = cls._extract_js_string(
-            content,
-            marker,
-        )
-
-        if raw is None:
-            return None
-
-        decoded = cls._decode_js_string(raw)
-
-        try:
-            return json.loads(decoded)
-        except (ValueError, TypeError):
-            return None
-
-    @classmethod
-    def _json_call_argument(cls, content: str, name: str):
-
-        marker = f"{name}(JSON.parse('")
-
-        raw = cls._extract_js_string(
-            content,
-            marker,
-        )
+        raw = cls._extract_js_string(content, marker)
 
         if raw is None:
             return None
 
         try:
-            return json.loads(
-                cls._decode_js_string(raw)
-            )
+            return json.loads(cls._decode_js_string(raw))
         except (ValueError, TypeError):
             return None
 
@@ -882,14 +846,12 @@ class AniZoneClient:
             return None
 
         for key in ("1", "5", "8"):
-
             title = value.get(key)
 
             if isinstance(title, str) and title.strip():
                 return title.strip()
 
         for title in value.values():
-
             if isinstance(title, str) and title.strip():
                 return title.strip()
 
@@ -898,39 +860,30 @@ class AniZoneClient:
     @staticmethod
     def _csrf_token(content):
 
-        match = re.search(
+        patterns = [
             r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)',
-            content,
-            re.I,
-        )
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']csrf-token',
+        ]
 
-        if not match:
-            match = re.search(
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']csrf-token',
-                content,
-                re.I,
-            )
+        for pattern in patterns:
+            match = re.search(pattern, content, re.I)
 
-        return (
-            html.unescape(match.group(1))
-            if match
-            else None
-        )
+            if match:
+                return html.unescape(match.group(1))
+
+        return None
 
     @staticmethod
     def _html_attribute_before(content: str, before: int):
 
         prefix = content[:before]
-
         marker = 'wire:snapshot="'
-
         start = prefix.rfind(marker)
 
         if start < 0:
             return None
 
         start += len(marker)
-
         end = prefix.find('"', start)
 
         if end < 0:
@@ -1001,7 +954,7 @@ class AniZoneClient:
         )
 
     # --------------------------------------------------
-    # VALIDATION / UTILITIES
+    # VALIDATION
     # --------------------------------------------------
 
     @staticmethod
@@ -1013,10 +966,7 @@ class AniZoneClient:
                 "INVALID_ID",
             )
 
-        if not re.fullmatch(
-            r"[A-Za-z0-9-]{1,180}",
-            slug,
-        ):
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,180}", slug):
             raise AniZoneError(
                 "Invalid AniZone ID",
                 "INVALID_ID",
@@ -1028,7 +978,6 @@ class AniZoneClient:
         merged = list(existing)
 
         def identity(item):
-
             if not isinstance(item, dict):
                 return None
 
