@@ -7,7 +7,7 @@ import json
 import re
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -191,11 +191,15 @@ class AniZoneClient:
 
         return content, cookies
 
-    # --------------------------------------------------
     # SEARCH
-    # --------------------------------------------------
 
     async def search(self, query: str, page: int = 1):
+
+        if not isinstance(query, str):
+            raise AniZoneError(
+                "Search query must be text",
+                "INVALID_PARAMETERS",
+            )
 
         query = query.strip()
 
@@ -257,9 +261,7 @@ class AniZoneClient:
             for item in parsed
         ]
 
-    # --------------------------------------------------
     # DETAILS
-    # --------------------------------------------------
 
     async def details(self, slug: str):
 
@@ -313,9 +315,7 @@ class AniZoneClient:
             "seasons": season_data,
         }
 
-    # --------------------------------------------------
     # EPISODES
-    # --------------------------------------------------
 
     async def episodes(self, slug: str):
 
@@ -340,9 +340,7 @@ class AniZoneClient:
             ],
         }
 
-    # --------------------------------------------------
     # SERIES PAGINATION
-    # --------------------------------------------------
 
     async def _scrape_series(self, slug: str):
 
@@ -518,9 +516,7 @@ class AniZoneClient:
             series_title=state.series_title,
         )
 
-    # --------------------------------------------------
     # INITIAL LIVEWIRE STATE
-    # --------------------------------------------------
 
     def _initial_page(self, content: str, cookies: list):
 
@@ -577,9 +573,7 @@ class AniZoneClient:
             series_title=self._pick_title(titles),
         )
 
-    # --------------------------------------------------
     # SEARCH PARSER
-    # --------------------------------------------------
 
     def _parse_search_items(self, items: list):
 
@@ -639,9 +633,7 @@ class AniZoneClient:
 
         return results
 
-    # --------------------------------------------------
     # EPISODE PARSER
-    # --------------------------------------------------
 
     def _parse_episodes(self, items: list):
 
@@ -722,9 +714,7 @@ class AniZoneClient:
 
         return None
 
-    # --------------------------------------------------
     # JAVASCRIPT / JSON HELPERS
-    # --------------------------------------------------
 
     @staticmethod
     def _extract_js_string(content: str, marker: str):
@@ -823,7 +813,8 @@ class AniZoneClient:
     @classmethod
     def _json_argument(cls, content: str, name: str):
 
-        marker = f"{name}: JSON.parse('")
+        # Fixed: removed the extra closing parenthesis.
+        marker = f"{name}: JSON.parse('"
 
         raw = cls._extract_js_string(content, marker)
 
@@ -831,13 +822,12 @@ class AniZoneClient:
             return None
 
         try:
-            return json.loads(cls._decode_js_string(raw))
+            decoded = cls._decode_js_string(raw)
+            return json.loads(decoded)
         except (ValueError, TypeError):
             return None
 
-    # --------------------------------------------------
     # HTML / LIVEWIRE HELPERS
-    # --------------------------------------------------
 
     @staticmethod
     def _pick_title(value):
@@ -920,9 +910,7 @@ class AniZoneClient:
 
         return match.group(1) == "true"
 
-    # --------------------------------------------------
     # COOKIE HELPERS
-    # --------------------------------------------------
 
     @staticmethod
     def _merge_cookies(existing: dict, incoming: list):
@@ -953,9 +941,7 @@ class AniZoneClient:
             for name, value in cookies.items()
         )
 
-    # --------------------------------------------------
     # VALIDATION
-    # --------------------------------------------------
 
     @staticmethod
     def _validate_slug(slug: str):
@@ -1001,9 +987,7 @@ class AniZoneClient:
 
         return merged
 
-    # --------------------------------------------------
     # PROVIDER METADATA
-    # --------------------------------------------------
 
     def metadata(self):
 
