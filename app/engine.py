@@ -6,18 +6,18 @@ import logging
 from typing import Any
 
 from app.config import settings
-from app import anizone
+from app.anizone import anizone as anizone_provider
 
 logger = logging.getLogger(__name__)
 
 
 class ProviderEngine:
 
-    ACTIONS = {
+    ACTIONS = (
         "search",
         "details",
         "episodes",
-    }
+    )
 
     ERROR_RETRYABILITY = {
         "NETWORK_ERROR": True,
@@ -28,17 +28,17 @@ class ProviderEngine:
         "INVALID_PARAMETERS": False,
         "PARSE_ERROR": False,
         "INVALID_RESPONSE": False,
+        "INVALID_ENCODING": False,
         "RESPONSE_TOO_LARGE": False,
         "INVALID_BASE_URL": False,
         "PAGINATION_ERROR": False,
         "PAGINATION_LIMIT": False,
         "PROVIDER_DISABLED": False,
-        "UNKNOWN_ACTION": False,
     }
 
     def __init__(self) -> None:
         self.providers = {
-            "anizone": anizone,
+            "anizone": anizone_provider,
         }
 
     def _enabled(self, provider_id: str) -> bool:
@@ -47,16 +47,12 @@ class ProviderEngine:
 
         return False
 
-    def _get_provider(self, provider_id: str):
+    def _provider_metadata(
+        self,
+        provider_id: str,
+    ) -> dict[str, Any]:
+
         provider = self.providers.get(provider_id)
-
-        if provider is None:
-            return None
-
-        return provider
-
-    def _provider_metadata(self, provider_id: str) -> dict[str, Any]:
-        provider = self._get_provider(provider_id)
 
         if provider is None:
             return {}
@@ -70,7 +66,6 @@ class ProviderEngine:
             metadata = {}
 
         result = dict(metadata)
-
         result["id"] = provider_id
         result["enabled"] = self._enabled(provider_id)
         result["actions"] = [
@@ -87,7 +82,11 @@ class ProviderEngine:
             for provider_id in self.providers
         ]
 
-    def get_provider(self, provider_id: str) -> dict[str, Any] | None:
+    def get_provider(
+        self,
+        provider_id: str,
+    ) -> dict[str, Any] | None:
+
         if provider_id not in self.providers:
             return None
 
@@ -100,7 +99,8 @@ class ProviderEngine:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
 
-        params = params or {}
+        if params is None:
+            params = {}
 
         if not isinstance(params, dict):
             return self._error(
@@ -108,24 +108,30 @@ class ProviderEngine:
                 "Parameters must be an object.",
             )
 
-        provider = self._get_provider(provider_id)
+        provider = self.providers.get(provider_id)
 
         if provider is None:
             return self._error(
                 "PROVIDER_NOT_FOUND",
-                f"Provider '{provider_id}' was not found.",
+                "Provider was not found.",
+                provider_id,
+                action,
             )
 
         if not self._enabled(provider_id):
             return self._error(
                 "PROVIDER_DISABLED",
-                f"Provider '{provider_id}' is disabled.",
+                "Provider is disabled.",
+                provider_id,
+                action,
             )
 
         if action not in self.ACTIONS:
             return self._error(
                 "UNKNOWN_ACTION",
-                f"Action '{action}' is not supported.",
+                "Unsupported provider action.",
+                provider_id,
+                action,
             )
 
         method = getattr(provider, action, None)
@@ -133,7 +139,9 @@ class ProviderEngine:
         if not callable(method):
             return self._error(
                 "ACTION_NOT_IMPLEMENTED",
-                f"Action '{action}' is not implemented.",
+                "Provider action is not implemented.",
+                provider_id,
+                action,
             )
 
         try:
@@ -150,13 +158,15 @@ class ProviderEngine:
             }
 
         except Exception as exc:
+
             code = getattr(exc, "code", None)
 
             if not isinstance(code, str) or not code:
-                if isinstance(exc, TypeError):
-                    code = "INVALID_PARAMETERS"
-                else:
-                    code = "INTERNAL_ERROR"
+                code = (
+                    "INVALID_PARAMETERS"
+                    if isinstance(exc, TypeError)
+                    else "INTERNAL_ERROR"
+                )
 
             retryable = self.ERROR_RETRYABILITY.get(
                 code,
@@ -176,9 +186,9 @@ class ProviderEngine:
             return self._error(
                 code,
                 message,
-                provider=provider_id,
-                action=action,
-                retryable=retryable,
+                provider_id,
+                action,
+                retryable,
             )
 
     @staticmethod
