@@ -1,42 +1,64 @@
-import os
+
 from functools import lru_cache
 
+from pydantic import Field, HttpUrl
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-class Settings:
-    APP_NAME: str = "Prophecy AniZone Server"
+
+class Settings(BaseSettings):
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+        validate_default=True,
+    )
+
+    # Application
+    APP_NAME: str = "Prophecy AniZone Sub Server"
     APP_VERSION: str = "1.0.0"
+    APP_ENV: str = "production"
 
-    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "production")
-    DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+    HOST: str = "0.0.0.0"
+    PORT: int = Field(default=8000, ge=1, le=65535)
 
-    API_PREFIX: str = "/api/v1"
+    # AniZone Provider
+    ANIZONE_ENABLED: bool = True
+    ANIZONE_BASE_URL: HttpUrl = "https://anizone.to"
 
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
-
-    API_KEY: str = os.getenv("API_KEY", "")
-
-    REQUEST_TIMEOUT: int = int(
-        os.getenv("REQUEST_TIMEOUT", "30")
+    # HTTP Client
+    REQUEST_TIMEOUT: float = Field(
+        default=20.0,
+        gt=0,
+        le=120,
     )
 
-    MAX_RETRIES: int = int(
-        os.getenv("MAX_RETRIES", "2")
+    REQUEST_RETRIES: int = Field(
+        default=2,
+        ge=0,
+        le=5,
     )
 
-    CACHE_TTL: int = int(
-        os.getenv("CACHE_TTL", "300")
+    USER_AGENT: str = (
+        "Mozilla/5.0 (compatible; ProphecyAniZoneServer/1.0)"
     )
 
-    ANIZONE_ENABLED: bool = (
-        os.getenv("ANIZONE_ENABLED", "true").lower() == "true"
+    # Response Limits
+    MAX_RESPONSE_BYTES: int = Field(
+        default=4 * 1024 * 1024,
+        ge=1024,
     )
 
-    ANIZONE_BASE_URL: str = os.getenv(
-        "ANIZONE_BASE_URL", ""
+    # Pagination
+    MAX_PAGINATION_PAGES: int = Field(
+        default=64,
+        ge=1,
+        le=100,
     )
 
 
-@lru_cache
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
 
