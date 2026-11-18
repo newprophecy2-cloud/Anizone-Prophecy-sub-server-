@@ -1,26 +1,17 @@
 
 from __future__ import annotations
 
-import os
-from dataclasses import asdict, is_dataclass
-from enum import Enum
-from inspect import isawaitable
+import inspect
+import logging
 from typing import Any
 
-from app.anizone import AniZoneError, anizone
+from app.config import settings
+from app import anizone
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderEngine:
-    """
-    Central provider manager.
-
-    Responsibilities:
-    - Provider registration
-    - Provider enable/disable checks
-    - Capability validation
-    - Action dispatch
-    - Standardized error responses
-    """
 
     ACTIONS = {
         "search",
@@ -28,23 +19,48 @@ class ProviderEngine:
         "episodes",
     }
 
+    ERROR_RETRYABILITY = {
+        "NETWORK_ERROR": True,
+        "UPSTREAM_HTTP_ERROR": True,
+        "NOT_FOUND": False,
+        "INVALID_ID": False,
+        "INVALID_PAGE": False,
+        "INVALID_PARAMETERS": False,
+        "PARSE_ERROR": False,
+        "INVALID_RESPONSE": False,
+        "RESPONSE_TOO_LARGE": False,
+        "INVALID_BASE_URL": False,
+        "PAGINATION_ERROR": False,
+        "PAGINATION_LIMIT": False,
+        "PROVIDER_DISABLED": False,
+        "UNKNOWN_ACTION": False,
+    }
+
     def __init__(self) -> None:
-        self.providers: dict[str, Any] = {
+        self.providers = {
             "anizone": anizone,
         }
 
-    @staticmethod
-    def _enabled(provider_id: str, provider: Any) -> bool:
-        env_name = f"{provider_id.upper()}_ENABLED"
-        value = os.getenv(env_name, "true").strip().lower()
+    def _enabled(self, provider_id: str) -> bool:
+        if provider_id == "anizone":
+            return settings.ANIZONE_ENABLED
 
-        if value in {"false", "0", "no", "off"}:
-            return False
+        return False
 
-        return True
+    def _get_provider(self, provider_id: str):
+        provider = self.providers.get(provider_id)
 
-    @staticmethod
-    def _metadata(provider_id: str, provider: Any) -> dict:
+        if provider is None:
+            return None
+
+        return provider
+
+    def _provider_metadata(self, provider_id: str) -> dict[str, Any]:
+        provider = self._get_provider(provider_id)
+
+        if provider is None:
+            return {}
+
         metadata = getattr(provider, "metadata", {})
 
         if callable(metadata):
@@ -53,193 +69,137 @@ class ProviderEngine:
         if not isinstance(metadata, dict):
             metadata = {}
 
-        return {
-            "id": provider_id,
-            "name": metadata.get("name", provider_id.title()),
-            "enabled": ProviderEngine._enabled(provider_id, provider),
-            "capabilities": [
-                action
-                for action in ProviderEngine.ACTIONS
-                if callable(getattr(provider, action, None))
-            ],
-        }
+        result = dict(metadata)
 
-    @staticmethod
-    def _serialize(value: Any) -> Any:
-        """Convert provider results into JSON-compatible data."""
-
-        if is_dataclass(value) and not isinstance(value, type):
-            return ProviderEngine._serialize(asdict(value))
-
-        if isinstance(value, Enum):
-            return value.value
-
-        if isinstance(value, dict):
-            return {
-                str(key): ProviderEngine._serialize(item)
-                for key, item in value.items()
-            }
-
-        if isinstance(value, (list, tuple, set)):
-            return [
-                ProviderEngine._serialize(item)
-                for item in value
-            ]
-
-        if hasattr(value, "model_dump"):
-            return ProviderEngine._serialize(value.model_dump())
-
-        if hasattr(value, "dict") and callable(value.dict):
-            return ProviderEngine._serialize(value.dict())
-
-        if value is None or isinstance(
-            value, (str, int, float, bool)
-        ):
-            return value
-
-        return str(value)
-
-    @staticmethod
-    def _success(
-        provider_id: str,
-        action: str,
-        data: Any,
-    ) -> dict:
-        return {
-            "status": "ok",
-            "provider": provider_id,
-            "action": action,
-            "data": ProviderEngine._serialize(data),
-        }
-
-    @staticmethod
-    def _error(
-        code: str,
-        message: str,
-        provider_id: str | None = None,
-        action: str | None = None,
-        retryable: bool = False,
-    ) -> dict:
-        return {
-            "status": "error",
-            "error": {
-                "code": code,
-                "message": message,
-                "provider": provider_id,
-                "action": action,
-                "retryable": retryable,
-            },
-        }
-
-    def list_providers(self) -> dict:
-        items = [
-            self._metadata(provider_id, provider)
-            for provider_id, provider in self.providers.items()
+        result["id"] = provider_id
+        result["enabled"] = self._enabled(provider_id)
+        result["actions"] = [
+            action
+            for action in self.ACTIONS
+            if callable(getattr(provider, action, None))
         ]
 
-        return {
-            "status": "ok",
-            "count": len(items),
-            "providers": items,
-        }
+        return result
 
-    def get_provider(self, provider_id: str) -> Any | None:
-        return self.providers.get(provider_id.lower().strip())
+    def list_providers(self) -> list[dict[str, Any]]:
+        return [
+            self._provider_metadata(provider_id)
+            for provider_id in self.providers
+        ]
+
+    def get_provider(self, provider_id: str) -> dict[str, Any] | None:
+        if provider_id not in self.providers:
+            return None
+
+        return self._provider_metadata(provider_id)
 
     async def execute(
         self,
         provider_id: str,
         action: str,
-        **params: Any,
-    ) -> dict:
-        provider_id = provider_id.lower().strip()
-        action = action.lower().strip()
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
 
-        provider = self.get_provider(provider_id)
+        params = params or {}
+
+        if not isinstance(params, dict):
+            return self._error(
+                "INVALID_PARAMETERS",
+                "Parameters must be an object.",
+            )
+
+        provider = self._get_provider(provider_id)
 
         if provider is None:
             return self._error(
-                code="PROVIDER_NOT_FOUND",
-                message=f"Provider '{provider_id}' is not registered.",
-                provider_id=provider_id,
-                action=action,
+                "PROVIDER_NOT_FOUND",
+                f"Provider '{provider_id}' was not found.",
             )
 
-        if not self._enabled(provider_id, provider):
+        if not self._enabled(provider_id):
             return self._error(
-                code="PROVIDER_DISABLED",
-                message=f"Provider '{provider_id}' is disabled.",
-                provider_id=provider_id,
-                action=action,
+                "PROVIDER_DISABLED",
+                f"Provider '{provider_id}' is disabled.",
             )
 
         if action not in self.ACTIONS:
             return self._error(
-                code="UNSUPPORTED_ACTION",
-                message=f"Action '{action}' is not supported.",
-                provider_id=provider_id,
-                action=action,
+                "UNKNOWN_ACTION",
+                f"Action '{action}' is not supported.",
             )
 
-        handler = getattr(provider, action, None)
+        method = getattr(provider, action, None)
 
-        if not callable(handler):
+        if not callable(method):
             return self._error(
-                code="CAPABILITY_UNAVAILABLE",
-                message=f"Provider does not implement '{action}'.",
-                provider_id=provider_id,
-                action=action,
+                "ACTION_NOT_IMPLEMENTED",
+                f"Action '{action}' is not implemented.",
             )
 
         try:
-            result = handler(**params)
+            result = method(**params)
 
-            if isawaitable(result):
+            if inspect.isawaitable(result):
                 result = await result
 
-            return self._success(
-                provider_id=provider_id,
-                action=action,
-                data=result,
+            return {
+                "status": "success",
+                "provider": provider_id,
+                "action": action,
+                "data": result,
+            }
+
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+
+            if not isinstance(code, str) or not code:
+                if isinstance(exc, TypeError):
+                    code = "INVALID_PARAMETERS"
+                else:
+                    code = "INTERNAL_ERROR"
+
+            retryable = self.ERROR_RETRYABILITY.get(
+                code,
+                False,
             )
 
-        except AniZoneError as exc:
-            error_name = type(exc).__name__
-
-            if error_name == "NotFound":
-                code = "NOT_FOUND"
-                retryable = False
-            elif error_name in {"Network", "Timeout"}:
-                code = "UPSTREAM_ERROR"
-                retryable = True
+            if code == "INTERNAL_ERROR":
+                logger.exception(
+                    "Unexpected provider error: %s / %s",
+                    provider_id,
+                    action,
+                )
+                message = "An internal provider error occurred."
             else:
-                code = "PROVIDER_ERROR"
-                retryable = False
+                message = str(exc)
 
             return self._error(
-                code=code,
-                message=str(exc),
-                provider_id=provider_id,
+                code,
+                message,
+                provider=provider_id,
                 action=action,
                 retryable=retryable,
             )
 
-        except TypeError as exc:
-            return self._error(
-                code="INVALID_PARAMETERS",
-                message=str(exc),
-                provider_id=provider_id,
-                action=action,
-            )
+    @staticmethod
+    def _error(
+        code: str,
+        message: str,
+        provider: str | None = None,
+        action: str | None = None,
+        retryable: bool = False,
+    ) -> dict[str, Any]:
 
-        except Exception:
-            return self._error(
-                code="INTERNAL_ERROR",
-                message="An unexpected provider error occurred.",
-                provider_id=provider_id,
-                action=action,
-                retryable=False,
-            )
+        return {
+            "status": "error",
+            "error": {
+                "code": code,
+                "message": message,
+                "provider": provider,
+                "action": action,
+                "retryable": retryable,
+            },
+        }
 
 
 engine = ProviderEngine()
