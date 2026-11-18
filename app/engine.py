@@ -17,11 +17,16 @@ class ProviderEngine:
         "search",
         "details",
         "episodes",
+        "sources",
+        "resolve",
+        "subtitles",
     )
 
     ERROR_RETRYABILITY = {
         "NETWORK_ERROR": True,
         "UPSTREAM_HTTP_ERROR": True,
+        "TIMEOUT": True,
+
         "NOT_FOUND": False,
         "INVALID_ID": False,
         "INVALID_PAGE": False,
@@ -34,6 +39,9 @@ class ProviderEngine:
         "PAGINATION_ERROR": False,
         "PAGINATION_LIMIT": False,
         "PROVIDER_DISABLED": False,
+        "SOURCE_NOT_FOUND": False,
+        "SOURCE_UNAVAILABLE": True,
+        "UNSUPPORTED_ACTION": False,
     }
 
     def __init__(self) -> None:
@@ -66,8 +74,10 @@ class ProviderEngine:
             metadata = {}
 
         result = dict(metadata)
+
         result["id"] = provider_id
         result["enabled"] = self._enabled(provider_id)
+
         result["actions"] = [
             action
             for action in self.ACTIONS
@@ -106,6 +116,8 @@ class ProviderEngine:
             return self._error(
                 "INVALID_PARAMETERS",
                 "Parameters must be an object.",
+                provider_id,
+                action,
             )
 
         provider = self.providers.get(provider_id)
@@ -139,7 +151,7 @@ class ProviderEngine:
         if not callable(method):
             return self._error(
                 "ACTION_NOT_IMPLEMENTED",
-                "Provider action is not implemented.",
+                f"Provider action '{action}' is not implemented.",
                 provider_id,
                 action,
             )
@@ -179,7 +191,9 @@ class ProviderEngine:
                     provider_id,
                     action,
                 )
+
                 message = "An internal provider error occurred."
+
             else:
                 message = str(exc)
 
