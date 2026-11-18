@@ -191,7 +191,9 @@ class AniZoneClient:
 
         return content, cookies
 
+    # --------------------------------------------------
     # SEARCH
+    # --------------------------------------------------
 
     async def search(self, query: str, page: int = 1):
 
@@ -261,7 +263,9 @@ class AniZoneClient:
             for item in parsed
         ]
 
+    # --------------------------------------------------
     # DETAILS
+    # --------------------------------------------------
 
     async def details(self, slug: str):
 
@@ -315,7 +319,9 @@ class AniZoneClient:
             "seasons": season_data,
         }
 
+    # --------------------------------------------------
     # EPISODES
+    # --------------------------------------------------
 
     async def episodes(self, slug: str):
 
@@ -340,7 +346,9 @@ class AniZoneClient:
             ],
         }
 
+    # --------------------------------------------------
     # SERIES PAGINATION
+    # --------------------------------------------------
 
     async def _scrape_series(self, slug: str):
 
@@ -516,7 +524,9 @@ class AniZoneClient:
             series_title=state.series_title,
         )
 
+    # --------------------------------------------------
     # INITIAL LIVEWIRE STATE
+    # --------------------------------------------------
 
     def _initial_page(self, content: str, cookies: list):
 
@@ -573,7 +583,9 @@ class AniZoneClient:
             series_title=self._pick_title(titles),
         )
 
+    # --------------------------------------------------
     # SEARCH PARSER
+    # --------------------------------------------------
 
     def _parse_search_items(self, items: list):
 
@@ -633,7 +645,9 @@ class AniZoneClient:
 
         return results
 
+    # --------------------------------------------------
     # EPISODE PARSER
+    # --------------------------------------------------
 
     def _parse_episodes(self, items: list):
 
@@ -714,7 +728,267 @@ class AniZoneClient:
 
         return None
 
+    # --------------------------------------------------
+    # PLAYBACK: EPISODE LOOKUP
+    # --------------------------------------------------
+
+    async def _get_episode_source_number(
+        self,
+        slug: str,
+        episode_id: str,
+    ):
+
+        self._validate_slug(slug)
+
+        if not isinstance(episode_id, (str, int)):
+            raise AniZoneError(
+                "Invalid episode ID",
+                "INVALID_EPISODE",
+            )
+
+        episode_id = str(episode_id)
+
+        if not re.fullmatch(r"[0-9]{1,8}", episode_id):
+            raise AniZoneError(
+                "Invalid episode ID",
+                "INVALID_EPISODE",
+            )
+
+        state = await self._scrape_series(slug)
+        episodes = self._parse_episodes(state.items)
+
+        episode = next(
+            (
+                item for item in episodes
+                if item.id == episode_id
+            ),
+            None,
+        )
+
+        if episode is None:
+            raise AniZoneError(
+                "Episode not found",
+                "NOT_FOUND",
+            )
+
+        return episode.number
+
+    # --------------------------------------------------
+    # PLAYBACK: WATCH PAGE SCRAPER
+    # --------------------------------------------------
+
+    async def _scrape_watch(
+        self,
+        slug: str,
+        source_number: int,
+    ):
+
+        self._validate_slug(slug)
+
+        if not isinstance(source_number, int) or source_number < 1:
+            raise AniZoneError(
+                "Invalid episode number",
+                "INVALID_EPISODE",
+            )
+
+        content, _ = await self._get_page(
+            f"/anime/{slug}/{source_number}"
+        )
+
+        player = self._json_call_argument(
+            content,
+            "vidstackPlayer",
+        )
+
+        if not isinstance(player, dict):
+            raise AniZoneError(
+                "AniZone player payload not found",
+                "PLAYER_NOT_FOUND",
+            )
+
+        stream_url = self._normalize_media_url(
+            player.get("src")
+        )
+
+        subtitles = []
+        raw_subtitles = player.get("subtitles", [])
+
+        if isinstance(raw_subtitles, list):
+            for item in raw_subtitles:
+
+                if not isinstance(item, dict):
+                    continue
+
+                try:
+                    subtitle_url = self._normalize_media_url(
+                        item.get("file")
+                    )
+                except AniZoneError:
+                    continue
+
+                subtitles.append({
+                    "url": subtitle_url,
+                    "label": str(item.get("title") or ""),
+                    "language": str(
+                        item.get("language") or ""
+                    ),
+                    "format": str(
+                        item.get("format") or "vtt"
+                    ),
+                    "default": bool(
+                        item.get("default", False)
+                    ),
+                })
+
+        return {
+            "url": stream_url,
+            "subtitles": subtitles,
+            "source_number": source_number,
+            "referer": self._url(
+                f"/anime/{slug}/{source_number}"
+            ),
+        }
+
+    # --------------------------------------------------
+    # SOURCES
+    # --------------------------------------------------
+
+    async def sources(
+        self,
+        slug: str,
+        episode_id: str,
+        language: str = None,
+        quality: str = None,
+        **kwargs,
+    ):
+
+        source_number = await self._get_episode_source_number(
+            slug,
+            episode_id,
+        )
+
+        watch = await self._scrape_watch(
+            slug,
+            source_number,
+        )
+
+        return {
+            "provider": "anizone",
+            "anime_id": slug,
+            "episode_id": str(episode_id),
+            "source_id": str(source_number),
+            "sources": [
+                {
+                    "id": str(source_number),
+                    "label": "AniZone HLS",
+                    "type": "hls",
+                    "url": watch["url"],
+                    "quality": None,
+                    "language": None,
+                    "headers": {
+                        "Referer": watch["referer"],
+                        "User-Agent": settings.USER_AGENT,
+                    },
+                    "direct_file": False,
+                }
+            ],
+            "subtitles": watch["subtitles"],
+        }
+
+    # --------------------------------------------------
+    # RESOLVE
+    # --------------------------------------------------
+
+    async def resolve(
+        self,
+        slug: str,
+        episode_id: str,
+        source_id: str = None,
+        language: str = None,
+        quality: str = None,
+        **kwargs,
+    ):
+
+        source_number = await self._get_episode_source_number(
+            slug,
+            episode_id,
+        )
+
+        if source_id is not None:
+            if str(source_id) != str(source_number):
+                raise AniZoneError(
+                    "Requested source does not match episode",
+                    "SOURCE_NOT_FOUND",
+                )
+
+        watch = await self._scrape_watch(
+            slug,
+            source_number,
+        )
+
+        preferred_subtitle = None
+
+        if watch["subtitles"]:
+            preferred_subtitle = next(
+                (
+                    item for item in watch["subtitles"]
+                    if item.get("default")
+                ),
+                watch["subtitles"][0],
+            )
+
+        return {
+            "provider": "anizone",
+            "anime_id": slug,
+            "episode_id": str(episode_id),
+            "source_id": str(source_number),
+            "status": "resolved",
+            "available": True,
+            "source": {
+                "label": "AniZone HLS",
+                "type": "hls",
+                "url": watch["url"],
+                "headers": {
+                    "Referer": watch["referer"],
+                    "User-Agent": settings.USER_AGENT,
+                },
+                "direct_file": False,
+            },
+            "subtitle": preferred_subtitle,
+            "subtitles": watch["subtitles"],
+        }
+
+    # --------------------------------------------------
+    # SUBTITLES
+    # --------------------------------------------------
+
+    async def subtitles(
+        self,
+        slug: str,
+        episode_id: str,
+        **kwargs,
+    ):
+
+        source_number = await self._get_episode_source_number(
+            slug,
+            episode_id,
+        )
+
+        watch = await self._scrape_watch(
+            slug,
+            source_number,
+        )
+
+        return {
+            "provider": "anizone",
+            "anime_id": slug,
+            "episode_id": str(episode_id),
+            "subtitles": watch["subtitles"],
+        }
+
+    # --------------------------------------------------
     # JAVASCRIPT / JSON HELPERS
+    # --------------------------------------------------
 
     @staticmethod
     def _extract_js_string(content: str, marker: str):
@@ -813,10 +1087,12 @@ class AniZoneClient:
     @classmethod
     def _json_argument(cls, content: str, name: str):
 
-        # Fixed: removed the extra closing parenthesis.
         marker = f"{name}: JSON.parse('"
 
-        raw = cls._extract_js_string(content, marker)
+        raw = cls._extract_js_string(
+            content,
+            marker,
+        )
 
         if raw is None:
             return None
@@ -827,7 +1103,56 @@ class AniZoneClient:
         except (ValueError, TypeError):
             return None
 
+    @classmethod
+    def _json_call_argument(cls, content: str, name: str):
+
+        marker = f"{name}(JSON.parse('"
+
+        raw = cls._extract_js_string(
+            content,
+            marker,
+        )
+
+        if raw is None:
+            return None
+
+        try:
+            decoded = cls._decode_js_string(raw)
+            return json.loads(decoded)
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _normalize_media_url(value):
+
+        if not isinstance(value, str) or not value.strip():
+            raise AniZoneError(
+                "Player media URL is missing",
+                "MEDIA_URL_MISSING",
+            )
+
+        value = html.unescape(
+            value.strip().replace("\\/", "/")
+        )
+
+        parsed = urlparse(value)
+
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            raise AniZoneError(
+                "Invalid or unsupported media URL",
+                "INVALID_MEDIA_URL",
+            )
+
+        return value
+
+    # --------------------------------------------------
     # HTML / LIVEWIRE HELPERS
+    # --------------------------------------------------
 
     @staticmethod
     def _pick_title(value):
@@ -910,7 +1235,9 @@ class AniZoneClient:
 
         return match.group(1) == "true"
 
+    # --------------------------------------------------
     # COOKIE HELPERS
+    # --------------------------------------------------
 
     @staticmethod
     def _merge_cookies(existing: dict, incoming: list):
@@ -941,7 +1268,9 @@ class AniZoneClient:
             for name, value in cookies.items()
         )
 
+    # --------------------------------------------------
     # VALIDATION
+    # --------------------------------------------------
 
     @staticmethod
     def _validate_slug(slug: str):
@@ -987,7 +1316,9 @@ class AniZoneClient:
 
         return merged
 
+    # --------------------------------------------------
     # PROVIDER METADATA
+    # --------------------------------------------------
 
     def metadata(self):
 
@@ -1000,6 +1331,9 @@ class AniZoneClient:
                 "search",
                 "details",
                 "episodes",
+                "sources",
+                "resolve",
+                "subtitles",
             ],
         }
 
