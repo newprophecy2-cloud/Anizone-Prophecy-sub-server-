@@ -1,4 +1,6 @@
+
 from contextlib import asynccontextmanager
+import inspect
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
@@ -11,23 +13,28 @@ from app.engine import engine
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.engine = engine
+
     yield
 
-    # Close provider HTTP clients during shutdown.
     for provider in engine.providers.values():
         close = getattr(provider, "close", None)
 
         if callable(close):
-            result = close()
+            try:
+                result = close()
 
-            if hasattr(result, "__await__"):
-                await result
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                # Shutdown should continue even if a provider
+                # client fails to close.
+                pass
 
 
 app = FastAPI(
-    title="Prophecy AniZone Sub Server",
+    title=settings.APP_NAME,
     description="Standalone provider API for Prophecy Backend.",
-    version="1.0.0",
+    version=settings.APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -39,17 +46,21 @@ class ExecuteRequest(BaseModel):
         description="Provider action",
     )
 
-    params: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Provider action parameters",
+    )
 
 
 @app.get("/")
 async def root():
     return {
-        "name": "Prophecy AniZone Sub Server",
+        "name": settings.APP_NAME,
         "status": "online",
         "version": app.version,
         "docs": "/docs",
         "health": "/health",
+        "manifest": "/api/v1/manifest",
     }
 
 
@@ -58,18 +69,24 @@ async def health():
     return {
         "status": "ok",
         "service": "prophecy-anizone",
+        "provider_enabled": settings.ANIZONE_ENABLED,
     }
 
 
 @app.get("/api/v1/manifest")
 async def manifest():
+    providers = engine.list_providers()
+
     return {
-        "name": "Prophecy AniZone Sub Server",
+        "name": settings.APP_NAME,
         "version": app.version,
         "protocol": "prophecy-provider-v1",
         "status": "ready",
         "providers_endpoint": "/api/v1/providers",
-        "execute_endpoint": "/api/v1/providers/{provider_id}/execute",
+        "execute_endpoint": (
+            "/api/v1/providers/{provider_id}/execute"
+        ),
+        "providers": providers,
         "capabilities": [
             "search",
             "details",
@@ -80,14 +97,17 @@ async def manifest():
 
 @app.get("/api/v1/providers")
 async def list_providers():
-    return engine.list_providers()
+    return {
+        "status": "ok",
+        "providers": engine.list_providers(),
+    }
 
 
 @app.get("/api/v1/providers/{provider_id}")
 async def provider_details(provider_id: str):
-    provider = engine.get_provider(provider_id)
+    metadata = engine.get_provider(provider_id)
 
-    if provider is None:
+    if metadata is None:
         raise HTTPException(
             status_code=404,
             detail={
@@ -95,8 +115,6 @@ async def provider_details(provider_id: str):
                 "provider": provider_id,
             },
         )
-
-    metadata = engine._metadata(provider_id, provider)
 
     return {
         "status": "ok",
@@ -112,39 +130,61 @@ async def execute_provider(
     return await engine.execute(
         provider_id=provider_id,
         action=request.action,
-        **request.params,
+        params=request.params,
     )
 
 
-# Convenient search endpoint.
+# --------------------------------------------------
+# CONVENIENT ANIME API ROUTES
+# --------------------------------------------------
+
 @app.get("/api/v1/anime/search")
 async def search_anime(
-    q: str = Query(min_length=1, max_length=150),
-    page: int = Query(default=1, ge=1, le=64),
+    q: str = Query(
+        min_length=1,
+        max_length=150,
+    ),
+    page: int = Query(
+        default=1,
+        ge=1,
+    ),
 ):
+    if page > settings.MAX_PAGINATION_PAGES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_PAGE",
+                "message": "Page exceeds configured limit.",
+            },
+        )
+
     return await engine.execute(
         provider_id="anizone",
         action="search",
-        query=q,
-        page=page,
+        params={
+            "query": q,
+            "page": page,
+        },
     )
 
 
-# Convenient details endpoint.
-@app.get("/api/v1/anime/{slug}")
-async def anime_details(slug: str):
-    return await engine.execute(
-        provider_id="anizone",
-        action="details",
-        slug=slug,
-    )
-
-
-# Convenient episode endpoint.
 @app.get("/api/v1/anime/{slug}/episodes")
 async def anime_episodes(slug: str):
     return await engine.execute(
         provider_id="anizone",
         action="episodes",
-        slug=slug,
+        params={
+            "slug": slug,
+        },
+    )
+
+
+@app.get("/api/v1/anime/{slug}")
+async def anime_details(slug: str):
+    return await engine.execute(
+        provider_id="anizone",
+        action="details",
+        params={
+            "slug": slug,
+        },
     )
