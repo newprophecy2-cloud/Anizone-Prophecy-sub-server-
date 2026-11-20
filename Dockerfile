@@ -1,17 +1,33 @@
-
-FROM python:3.12-slim
+# Build stage
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Install certificates and build tools
+RUN apk add --no-cache ca-certificates git
 
-COPY requirements.txt .
+# Cache dependencies
+COPY go.mod go.sum* ./
+RUN go mod download
 
-RUN pip install --no-cache-dir -r requirements.txt
-
+# Copy source code
 COPY . .
+
+# Build statically linked binary
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/server ./cmd/server
+
+# Final runtime image
+FROM alpine:3.20
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --from=builder /app/server /app/server
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+ENV PORT=8000 \
+    HOST=0.0.0.0
+
+CMD ["/app/server"]
