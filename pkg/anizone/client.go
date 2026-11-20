@@ -79,6 +79,7 @@ type Client struct {
 	maxResponseBytes   int64
 	maxPages           int
 	userAgent          string
+	customCookie       string
 	httpClient         *http.Client
 }
 
@@ -89,8 +90,19 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return nil, NewAniZoneError("AniZone base URL must use HTTPS", "INVALID_BASE_URL")
 	}
 
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+	}
+
+	if cfg.ProxyURL != "" {
+		if proxyURI, err := url.Parse(cfg.ProxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURI)
+		}
+	}
+
 	client := &http.Client{
-		Timeout: cfg.RequestTimeout,
+		Timeout:   cfg.RequestTimeout,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
@@ -106,6 +118,7 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		maxResponseBytes: cfg.MaxResponseBytes,
 		maxPages:         cfg.MaxPaginationPages,
 		userAgent:        cfg.UserAgent,
+		customCookie:     cfg.CustomCookie,
 		httpClient:       client,
 	}, nil
 }
@@ -153,8 +166,16 @@ func (c *Client) request(ctx context.Context, method, path string, params map[st
 		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
+		if c.customCookie != "" {
+			req.Header.Set("Cookie", c.customCookie)
+		}
+
 		for k, v := range extraHeaders {
-			req.Header.Set(k, v)
+			if k == "Cookie" && c.customCookie != "" {
+				req.Header.Set("Cookie", c.customCookie+"; "+v)
+			} else {
+				req.Header.Set(k, v)
+			}
 		}
 
 		resp, err := c.httpClient.Do(req)
