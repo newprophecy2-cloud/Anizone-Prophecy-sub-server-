@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"sort"
@@ -100,8 +101,17 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		}
 	}
 
+	// Cookie jar — persistent across requests (like Python httpx.AsyncClient)
+	// This is critical for Cloudflare: cf_clearance, __cf_bm etc. must be
+	// stored and re-sent automatically, otherwise every 2nd+ request gets 403.
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, NewAniZoneError("Failed to create cookie jar", "INTERNAL_ERROR", err)
+	}
+
 	client := &http.Client{
 		Timeout:   cfg.RequestTimeout,
+		Jar:       jar,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
