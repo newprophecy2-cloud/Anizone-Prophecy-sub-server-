@@ -1251,11 +1251,18 @@ func (c *Client) htmlAttributeBefore(content string, before int) string {
 }
 
 func (c *Client) jsPropertyString(content, name string) *string {
-	pattern := fmt.Sprintf(`\b%s\s*:\s*(['"])(.*?)\1`, regexp.QuoteMeta(name))
-	re := regexp.MustCompile(pattern)
+	pattern := fmt.Sprintf(`(?s)\b%s\s*:\s*(?:'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)")`, regexp.QuoteMeta(name))
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
 	m := re.FindStringSubmatch(content)
 	if len(m) > 2 {
-		s := c.decodeJSString(m[2])
+		raw := m[1]
+		if raw == "" {
+			raw = m[2]
+		}
+		s := c.decodeJSString(raw)
 		return &s
 	}
 	return nil

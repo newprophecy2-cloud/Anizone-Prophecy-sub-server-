@@ -118,3 +118,20 @@ func TestValidateSlug(t *testing.T) {
 		t.Errorf("Expected error for invalid slug, got nil")
 	}
 }
+
+func TestJsPropertyString(t *testing.T) {
+	cfg := &config.Config{
+		AniZoneBaseURL: "https://anizone.to",
+	}
+	client, _ := NewClient(cfg)
+
+	got := client.jsPropertyString(`{ nextCursor: 'abc123', hasMore: true }`, "nextCursor")
+	if got == nil || *got != "abc123" {
+		t.Fatalf("Expected abc123, got %v", got)
+	}
+
+	got2 := client.jsPropertyString(`{ nextCursor: "xyz\"789", hasMore: false }`, "nextCursor")
+	if got2 == nil || *got2 != `xyz"789` {
+		t.Fatalf("Expected xyz\"789, got %v", got2)
+	}
+}
