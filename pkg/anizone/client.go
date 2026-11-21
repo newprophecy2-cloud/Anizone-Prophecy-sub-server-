@@ -91,15 +91,14 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return nil, NewAniZoneError("AniZone base URL must use HTTPS", "INVALID_BASE_URL")
 	}
 
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-	}
-
+	proxyFunc := http.ProxyFromEnvironment
 	if cfg.ProxyURL != "" {
 		if proxyURI, err := url.Parse(cfg.ProxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(proxyURI)
+			proxyFunc = http.ProxyURL(proxyURI)
 		}
 	}
+
+	transport := newChromeRoundTripper(proxyFunc)
 
 	// Cookie jar — persistent across requests (like Python httpx.AsyncClient)
 	// This is critical for Cloudflare: cf_clearance, __cf_bm etc. must be
