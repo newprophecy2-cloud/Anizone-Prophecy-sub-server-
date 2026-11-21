@@ -81,7 +81,7 @@ func Load() *Config {
 		AniZoneBaseURL:     baseURL,
 		RequestTimeout:     time.Duration(timeoutSec * float64(time.Second)),
 		RequestRetries:     getEnvInt("REQUEST_RETRIES", 2),
-		UserAgent:          getEnv("USER_AGENT", "Mozilla/5.0 (compatible; ProphecyAniZoneServer/1.0)"),
+		UserAgent:          getEnv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"),
 		CustomCookie:       getEnv("CUSTOM_COOKIE", ""),
 		ProxyURL:           getEnv("HTTP_PROXY", getEnv("HTTPS_PROXY", "")),
 		MaxResponseBytes:   int64(getEnvInt("MAX_RESPONSE_BYTES", 4*1024*1024)),

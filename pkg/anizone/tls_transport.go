@@ -16,7 +16,7 @@ import (
 
 var errNotH2 = errors.New("server did not negotiate h2")
 
-// chromeRoundTripper uses uTLS (Chrome TLS fingerprint) with HTTP/2 and
+// firefoxRoundTripper uses uTLS (Firefox TLS fingerprint) with HTTP/2 and
 // falls back to HTTP/1.1 when the server does not negotiate h2 or when an
 // HTTP proxy is configured.
 type chromeRoundTripper struct {
@@ -31,7 +31,7 @@ func newChromeRoundTripper(proxyFunc func(*http.Request) (*url.URL, error)) http
 		KeepAlive: 30 * time.Second,
 	}
 
-	dialUTLS := func(ctx context.Context, network, addr string, alpn []string) (*utls.UConn, error) {
+	dialUTLS := func(ctx context.Context, network, addr string) (*utls.UConn, error) {
 		rawConn, err := dialer.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
@@ -45,11 +45,8 @@ func newChromeRoundTripper(proxyFunc func(*http.Request) (*url.URL, error)) http
 		cfg := &utls.Config{
 			ServerName: host,
 		}
-		if len(alpn) > 0 {
-			cfg.NextProtos = alpn
-		}
 
-		uConn := utls.UClient(rawConn, cfg, utls.HelloChrome_Auto)
+		uConn := utls.UClient(rawConn, cfg, utls.HelloFirefox_Auto)
 		if err := uConn.HandshakeContext(ctx); err != nil {
 			_ = rawConn.Close()
 			return nil, err
@@ -59,7 +56,7 @@ func newChromeRoundTripper(proxyFunc func(*http.Request) (*url.URL, error)) http
 
 	h2 := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			uConn, err := dialUTLS(ctx, network, addr, nil)
+			uConn, err := dialUTLS(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
@@ -74,7 +71,7 @@ func newChromeRoundTripper(proxyFunc func(*http.Request) (*url.URL, error)) http
 	h1 := &http.Transport{
 		Proxy: proxyFunc,
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialUTLS(ctx, network, addr, []string{"http/1.1"})
+			return dialUTLS(ctx, network, addr)
 		},
 	}
 

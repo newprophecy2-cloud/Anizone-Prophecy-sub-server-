@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/newprophecy2-cloud/Anizone-Prophecy-sub-server-/pkg/anizone"
 	"github.com/newprophecy2-cloud/Anizone-Prophecy-sub-server-/pkg/config"
 	"github.com/newprophecy2-cloud/Anizone-Prophecy-sub-server-/pkg/engine"
 )
@@ -62,7 +61,6 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("GET /api/v1/anime/{slug}/episodes/{episode_id}/sources", s.handleEpisodeSources)
 	mux.HandleFunc("POST /api/v1/anime/{slug}/episodes/{episode_id}/resolve", s.handleResolveEpisodeSource)
 	mux.HandleFunc("GET /api/v1/anime/{slug}/episodes/{episode_id}/subtitles", s.handleEpisodeSubtitles)
-	mux.HandleFunc("GET /api/v1/debug/probe", s.handleDebugProbe)
 
 	s.mux = mux
 }
@@ -268,10 +266,6 @@ func (s *Server) handleEpisodeSubtitles(w http.ResponseWriter, r *http.Request) 
 		"episode_id": episodeID,
 	})
 	jsonResponse(w, http.StatusOK, result)
-}
-
-func (s *Server) handleDebugProbe(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, anizone.ProbeAll(r.Context()))
 }
 
 func main() {
